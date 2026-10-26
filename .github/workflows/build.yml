@@ -23,6 +23,7 @@ jobs:
           path: |
             .cache/pacman
             .cache/paru
+            .cache/paru-pkg
             .cache/ccache
             .cache/cargo
           key: aur-${{ inputs.pkgname }}-${{ github.run_id }}
@@ -36,13 +37,14 @@ jobs:
           EXTRADEPS: ${{ inputs.deps }}
         run: |
           set -euo pipefail
-          mkdir -p out .cache/pacman .cache/paru .cache/ccache .cache/cargo
+          mkdir -p out .cache/pacman .cache/paru .cache/paru-pkg .cache/ccache .cache/cargo
           docker run --rm \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
             -e PKGNAME -e EXTRADEPS \
             -v "$PWD/out:/out:rw" \
             -v "$PWD/.cache/pacman:/var/cache/pacman/pkg:rw" \
             -v "$PWD/.cache/paru:/home/builder/.cache/paru:rw" \
+            -v "$PWD/.cache/paru-pkg:/parucache:rw" \
             -v "$PWD/.cache/ccache:/home/builder/.ccache:rw" \
             -v "$PWD/.cache/cargo:/home/builder/.cargo:rw" \
             archlinux:base-devel \
@@ -52,15 +54,35 @@ jobs:
 
               # Snapshot image ships without a db; a full upgrade avoids
               # partial-upgrade breakage when deps get pulled in.
-              pacman -Syu --noconfirm --needed sudo git ccache &>/dev/null
+              pacman -Syu --noconfirm --needed sudo git ccache rust &>/dev/null
 
               # makepkg refuses to run as root.
               id builder &>/dev/null || useradd -m builder
               echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
               chmod 0440 /etc/sudoers.d/builder
-
               mkdir -p /tmp/pkgs /tmp/makepkg
-              chown -R builder:builder /home/builder /tmp/pkgs /tmp/makepkg
+              chown -R builder:builder /home/builder /parucache /tmp/pkgs /tmp/makepkg
+
+              # --- bootstrap paru -------------------------------------------
+              # paru-bin is prebuilt against an older libalpm and fails with
+              # "libalpm.so.15: cannot open shared object file" on a current
+              # container, so build paru from source and cache the result.
+              if ! command -v paru &>/dev/null; then
+                cached=(/parucache/paru-[0-9]*.pkg.tar.zst)
+                if (( ${#cached[@]} )); then
+                  echo "==> installing cached paru package"
+                  pacman -U --noconfirm "${cached[0]}"
+                else
+                  echo "==> building paru from source"
+                  su builder -c "cd /tmp && rm -rf paru && git clone --depth=1 https://aur.archlinux.org/paru.git && cd paru && makepkg -sf --noconfirm"
+                  mapfile -t ppkgs < <(find /tmp/paru -maxdepth 1 -name "paru-[0-9]*.pkg.tar.zst" -type f)
+                  (( ${#ppkgs[@]} )) || { echo "error: paru build produced no package" >&2; exit 1; }
+                  pacman -U --noconfirm "${ppkgs[0]}"
+                  cp -v "${ppkgs[0]}" /parucache/
+                  chown "$HOST_UID:$HOST_GID" /parucache/*.pkg.tar.zst
+                fi
+              fi
+              paru --version
 
               # Build tuning belongs in ~/.makepkg.conf, NOT paru.conf.
               {
@@ -71,18 +93,15 @@ jobs:
               } > /home/builder/.makepkg.conf
               chown builder:builder /home/builder/.makepkg.conf
 
-              # Bootstrap paru (-bin, nothing is compiled).
-              if ! command -v paru &>/dev/null; then
-                su builder -c "cd /tmp && git clone --depth=1 https://aur.archlinux.org/paru-bin.git && cd paru-bin && makepkg -si --noconfirm"
-              fi
-
               # Builds the target and any AUR deps; installs only in the container.
-              su builder -c "cd /tmp && paru -S --noconfirm --needed $EXTRADEPS $PKGNAME" || {
+              if ! su builder -c "cd /tmp && paru -S --noconfirm --needed $EXTRADEPS $PKGNAME"; then
                 echo "--- paru failed" >&2
                 exit 1
-              }
+              fi
 
-              mapfile -t pkgs < <(find /tmp/pkgs -name "*.pkg.tar.*" -type f)
+              # paru may honour PKGDEST or leave packages in its clone cache.
+              mapfile -t pkgs < <(find /tmp/pkgs /home/builder/.cache/paru/clone \
+                                    -name "*.pkg.tar.*" -type f 2>/dev/null)
               (( ${#pkgs[@]} )) || { echo "error: no packages produced" >&2; exit 1; }
 
               cp -v "${pkgs[@]}" /out/
