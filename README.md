@@ -33,7 +33,7 @@ No Codespaces quota. No storage bills. No daemon on your machine.
                ▼
 ┌──────────────────────────────────────────┐
 │  🏗️ Build container (throwaway)          │
-│  pacman -Syu → paru -S --needed <pkg>    │
+│  pacman -Syu → paru (from source)        │
 │  builds the package AND its AUR deps     │
 └──────────────┬───────────────────────────┘
                │  3. artifact upload (.pkg.tar.zst)
@@ -103,6 +103,7 @@ Four caches survive between runs via `actions/cache`:
 |---|---|
 | `.cache/pacman` | Downloaded repo packages |
 | `.cache/paru` | Cloned PKGBUILDs and source tarballs |
+| `.cache/paru-pkg` | The compiled `paru` package itself (see caveat below) |
 | `.cache/cargo` | Rust registry for `-git` / `-rs` packages |
 | `.cache/ccache` | Compiled C/C++ objects |
 
