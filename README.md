@@ -48,21 +48,41 @@ You never install `paru`, `base-devel`, or a chroot locally. The container is de
 
 ---
 
+## 🍴 Step 0 — Fork this repo (required)
+
+**You must fork before anything else.** `abuild` dispatches a workflow on *your* GitHub account; it cannot use someone else's repo.
+
+```bash
+gh repo fork Praveensenpai/aur-builder --clone --remote
+```
+
+Or click **Fork** at the top-right of this page.
+
+> [!IMPORTANT]
+> **Fork, don't clone.** A plain `git clone` still points `origin` at `Praveensenpai/aur-builder`, so `gh workflow run` would target my repo and fail. The command above sets your fork as `origin` and keeps mine as `upstream`.
+>
+> Your fork must stay **public** — that's what makes Actions minutes and artifact storage free. A private fork burns your 2,000 monthly minutes.
+
+---
+
 ## 🚀 Quick start
 
 ```bash
-# 1. grab the wrapper
-git clone https://github.com/Praveensenpai/aur-builder
-install -Dm755 aur-builder/abuild ~/.local/bin/abuild
+# 1. fork + clone in one step (see Step 0 above)
+gh repo fork Praveensenpai/aur-builder --clone --remote
+cd aur-builder
 
-# 2. verify
-command -v abuild          # ~/.local/bin/abuild
+# 2. install the wrapper
+install -Dm755 abuild ~/.local/bin/abuild
 
-# 3. build something
-abuild pfetch
+# 3. verify — resolves to <your-login>/aur-builder automatically
+command -v abuild
+
+# 4. build something that actually compiles
+abuild zen-browser-bin
 ```
 
-That's it. The repo name is already the default — no config file, no env vars, no `.bashrc` edits.
+`abuild` derives your repo from `gh api user`, so there is **no config file and no env var to set** as long as your fork is named `aur-builder`.
 
 > [!NOTE]
 > `~/.local/bin` is on `PATH` by default on Arch/Omarchy. If `command -v abuild` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc.
@@ -88,7 +108,7 @@ Artifacts land in `/tmp/abuild/<pkgname>/`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUR_BUILDER_REPO` | `Praveensenpai/aur-builder` | Point at a fork |
+| `AUR_BUILDER_REPO` | `<your-login>/aur-builder` | Override the repo (different fork name) |
 | `AUR_BUILDER_WORKFLOW` | `build.yml` | Alternate workflow file |
 | `AUR_BUILDER_DL` | `/tmp/abuild` | Where artifacts are downloaded |
 | `AUR_BUILDER_NOINSTALL` | `0` | `1` = skip `pacman -U` |
@@ -97,7 +117,7 @@ Artifacts land in `/tmp/abuild/<pkgname>/`.
 
 ## ⚡ What makes it fast
 
-Four caches survive between runs via `actions/cache`:
+Five caches survive between runs via `actions/cache`:
 
 | Cache | Saved |
 |---|---|
@@ -118,6 +138,7 @@ Measured reference — cold build of a 141-dependency Rust project on a 4-thread
 > [!WARNING]
 > **Version skew will bite you.** The container runs `archlinux:base-devel` at the latest snapshot. If your local system is weeks behind, the built package may demand a newer `glibc` and `pacman -U` will refuse it. Run `sudo pacman -Syu` before `abuild`.
 
+- **AUR packages only.** Names that exist in `core`/`extra`/`multilib` are rejected — paru would install a prebuilt binary and produce no artifact. Use `sudo pacman -S` for those.
 - **Unsigned packages.** Hence `pacman -U`, not `pacman -S`. The default Arch `SigLevel` accepts local installs.
 - **Not a `yay` replacement.** `abuild` takes package names, not `-Syu` semantics. Keep `yay` for routine updates and use `abuild` for the handful of packages that compile for 20 minutes.
 - **Job timeout is 5 hours.** Artifacts are kept 3 days to stay inside free storage.
@@ -125,9 +146,9 @@ Measured reference — cold build of a 141-dependency Rust project on a 4-thread
 
 ---
 
-## 🔧 Running your own
+## 🔧 Workflow inputs
 
-Fork this repo and set `AUR_BUILDER_REPO=<you>/aur-builder`. The workflow takes two inputs:
+Both inputs are optional when using `abuild`; they matter if you trigger the workflow by hand:
 
 | Input | Required | Meaning |
 |---|---|---|
@@ -135,6 +156,9 @@ Fork this repo and set `AUR_BUILDER_REPO=<you>/aur-builder`. The workflow takes 
 | `deps` | no | Space-separated extra AUR packages built in the same run |
 
 You can also trigger it from the web UI: **Actions → build-aur → Run workflow**.
+
+> [!NOTE]
+> The workflow **rejects packages that exist in the official repos** (`core`/`extra`/`multilib`). Those are already compiled — install them with `sudo pacman -S`. Only packages that must be built from source belong here.
 
 ---
 

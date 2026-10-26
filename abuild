@@ -5,14 +5,20 @@
 #   abuild zen-browser-bin
 #   abuild some-tool other-dep      # deps built in the same run
 #
-# Requires: gh (authenticated), sudo/pacman.
-# Env: AUR_BUILDER_REPO     default Praveensenpai/aur-builder
+# Requires: gh (authenticated), sudo/pacman, a fork of aur-builder.
+# Env: AUR_BUILDER_REPO     default <your-gh-login>/aur-builder
 #      AUR_BUILDER_WORKFLOW default build.yml
 #      AUR_BUILDER_DL       default /tmp/abuild
 #      AUR_BUILDER_NOINSTALL=1  download only, skip pacman -U
 set -euo pipefail
 
-REPO="${AUR_BUILDER_REPO:-Praveensenpai/aur-builder}"
+# Default to YOUR fork, never someone else's account.
+REPO="${AUR_BUILDER_REPO:-}"
+if [[ -z "$REPO" ]]; then
+  _login="$(gh api user --jq .login 2>/dev/null || true)"
+  [[ -n "$_login" ]] || { echo "abuild: gh not authenticated (run: gh auth login)" >&2; exit 1; }
+  REPO="$_login/aur-builder"
+fi
 WORKFLOW="${AUR_BUILDER_WORKFLOW:-build.yml}"
 DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
 

@@ -93,8 +93,19 @@ jobs:
               } > /home/builder/.makepkg.conf
               chown builder:builder /home/builder/.makepkg.conf
 
-              # Builds the target and any AUR deps; installs only in the container.
-              if ! su builder -c "cd /tmp && paru -S --noconfirm --needed $EXTRADEPS $PKGNAME"; then
+              # Fail fast with a clear message if the name is not an AUR package.
+              # Without this, paru silently resolves repo packages (e.g. pfetch
+              # -> extra/pfetch-rs), installs a prebuilt binary and builds nothing.
+              if ! curl -sf --max-time 20 \
+                   "https://aur.archlinux.org/rpc/v5/info?arg[]=$PKGNAME" \
+                   | grep -q '"resultcount":[[:space:]]*1'; then
+                echo "error: '$PKGNAME' is not in the AUR." >&2
+                echo "       Install repo packages with: sudo pacman -S $PKGNAME" >&2
+                exit 1
+              fi
+
+              # --aur: never fall back to repo packages, always compile from source.
+              if ! su builder -c "cd /tmp && paru -S --aur --noconfirm --needed $EXTRADEPS $PKGNAME"; then
                 echo "--- paru failed" >&2
                 exit 1
               fi
