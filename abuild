@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# abuild — build AUR packages on GitHub Actions, then install locally.
+#
+#   abuild <pkgname> [aur-dep...]
+#   abuild zen-browser-bin
+#   abuild some-tool other-dep      # deps built in the same run
+#
+# Requires: gh (authenticated), sudo/pacman.
+# Env: AUR_BUILDER_REPO     default Praveensenpai/aur-builder
+#      AUR_BUILDER_WORKFLOW default build.yml
+#      AUR_BUILDER_DL       default /tmp/abuild
+#      AUR_BUILDER_NOINSTALL=1  download only, skip pacman -U
+set -euo pipefail
+
+REPO="${AUR_BUILDER_REPO:-Praveensenpai/aur-builder}"
+WORKFLOW="${AUR_BUILDER_WORKFLOW:-build.yml}"
+DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
+
+die() { echo "abuild: $*" >&2; exit 1; }
+[[ $# -ge 1 ]] || die "usage: abuild <pkgname> [aur-dep...]"
+
+main_pkg="$1"; shift
+deps="${*:-}"
+
+echo "==> dispatching $main_pkg${deps:+ (+ $deps)} to $REPO"
+gh workflow run "$WORKFLOW" -R "$REPO" \
+  -f "pkgname=$main_pkg" -f "deps=$deps" \
+  || die "dispatch failed (check repo name, workflow name, gh auth status)"
+
+# gh returns before the run object exists; poll briefly for it
+run_id=""
+for _ in {1..15}; do
+  run_id="$(gh run list -R "$REPO" -w "$WORKFLOW" -L 1 \
+              --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+  [[ -n "$run_id" ]] && break
+  sleep 2
+done
+[[ -n "$run_id" ]] || die "no run appeared after dispatch"
+
+echo "==> https://github.com/$REPO/actions/runs/$run_id"
+echo "==> waiting (Ctrl-C is safe; the build continues remotely)"
+
+gh run watch "$run_id" -R "$REPO" --exit-status --interval 15 \
+  || die "build failed — logs: gh run view $run_id -R $REPO --log-failed"
+
+dest="$DL_DIR/$main_pkg"
+rm -rf "$dest"; mkdir -p "$dest"
+gh run download "$run_id" -R "$REPO" -D "$dest" >/dev/null
+
+mapfile -t pkgs < <(find "$dest" -name '*.pkg.tar.*' -type f | sort)
+(( ${#pkgs[@]} )) || die "artifact contained no packages"
+
+echo "==> built:"
+printf '    %s\n' "${pkgs[@]##*/}"
+
+if [[ "${AUR_BUILDER_NOINSTALL:-0}" == 1 ]]; then
+  echo "==> AUR_BUILDER_NOINSTALL=1, skipping install"
+  echo "    install manually: sudo pacman -U ${pkgs[*]}"
+  exit 0
+fi
+
+sudo pacman -U --noconfirm "${pkgs[@]}"
+echo "==> done: $main_pkg"

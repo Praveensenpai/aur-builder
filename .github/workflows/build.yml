@@ -1,0 +1,93 @@
+name: build-aur
+
+# Public repo => unlimited Actions minutes, 4-core runner, zero Codespaces quota.
+on:
+  workflow_dispatch:
+    inputs:
+      pkgname:
+        description: "AUR package name (e.g. zen-browser-bin)"
+        required: true
+      deps:
+        description: "Extra AUR deps to build first (space separated, optional)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Cache pacman/paru/ccache/cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/pacman
+            .cache/paru
+            .cache/ccache
+            .cache/cargo
+          key: aur-${{ inputs.pkgname }}-${{ github.run_id }}
+          restore-keys: |
+            aur-${{ inputs.pkgname }}-
+            aur-
+
+      - name: Build with paru inside archlinux container
+        env:
+          PKGNAME: ${{ inputs.pkgname }}
+          EXTRADEPS: ${{ inputs.deps }}
+        run: |
+          set -euo pipefail
+          mkdir -p out .cache/pacman .cache/paru .cache/ccache .cache/cargo
+          docker run --rm \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -e PKGNAME -e EXTRADEPS \
+            -v "$PWD/out:/out:rw" \
+            -v "$PWD/.cache/pacman:/var/cache/pacman/pkg:rw" \
+            -v "$PWD/.cache/paru:/home/builder/.cache/paru:rw" \
+            -v "$PWD/.cache/ccache:/home/builder/.ccache:rw" \
+            -v "$PWD/.cache/cargo:/home/builder/.cargo:rw" \
+            archlinux:base-devel \
+            bash -lc '
+              set -euo pipefail
+              shopt -s nullglob
+
+              # snapshot image has no db; full upgrade avoids partial-upgrade breakage
+              pacman -Syu --noconfirm --needed sudo git &>/dev/null
+
+              id builder &>/dev/null || useradd -m builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+              chmod 0440 /etc/sudoers.d/builder
+              chown -R builder:builder /home/builder
+
+              # --- bootstrap paru (from AUR, -bin so no compile) ---
+              if ! command -v paru &>/dev/null; then
+                su builder -c "cd /tmp && git clone --depth=1 https://aur.archlinux.org/paru-bin.git && cd paru-bin && makepkg -si --noconfirm"
+              fi
+
+              # parallel builds, ccache
+              {
+                echo "MAKEFLAGS=-j$(nproc)"
+                echo "BUILDDIR=/tmp/makepkg"
+                echo "CCACHE_DIR=/home/builder/.ccache"
+              } >> /home/builder/.config/paru/paru.conf
+
+              # --norebuild: reuse cached clones, --build: do not install
+              su builder -c "paru -S --noconfirm --needed --build --norebuild $EXTRADEPS $PKGNAME" || {
+                echo "--- paru failed" >&2
+                exit 1
+              }
+
+              # paru leaves built packages in its clone cache
+              mapfile -t pkgs < <(find /home/builder/.cache/paru/clone -name "*.pkg.tar.*" -type f)
+              (( ${#pkgs[@]} )) || { echo "error: no packages produced" >&2; exit 1; }
+
+              printf "%s\n" "${pkgs[@]}" > /tmp/built.txt
+              cp -v "${pkgs[@]}" /out/
+              chown -R "$HOST_UID:$HOST_GID" /out
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ inputs.pkgname }}-${{ github.run_id }}
+          path: out/*.pkg.tar.*
+          if-no-files-found: error
+          retention-days: 3
