@@ -1,62 +1,143 @@
-# aur-builder
+# ⚡ abuild
 
-Build AUR packages on GitHub Actions' 4-core runners and install the result on your Arch box. Nothing heavy touches local CPU; the built `.pkg.tar.zst` is pulled back and installed with `pacman -U`.
+> **Compile AUR packages on GitHub's 4-core runners. Install the finished binary on your Arch box. Your CPU stays cold.**
 
-Works because a **public** repo gets unlimited Actions minutes and free artifact storage.
+[![Actions](https://img.shields.io/badge/Actions-unlimited%20on%20public%20repos-a6e3a1?style=flat-square&logo=githubactions&logoColor=white)](https://github.com/Praveensenpai/aur-builder/actions)
+[![Platform](https://img.shields.io/badge/Platform-Arch%20Linux-1793D1?style=flat-square&logo=archlinux&logoColor=white)](https://archlinux.org)
+[![Shell](https://img.shields.io/badge/Shell-bash-4EAA25?style=flat-square&logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Cost](https://img.shields.io/badge/Cost-%240.00-cba6f7?style=flat-square)](https://github.com/Praveensenpai/aur-builder/actions)
 
-## Setup (once)
+Some AUR packages take 20 minutes to compile. This tool moves that compile to a disposable GitHub Actions container, then hands you back a `.pkg.tar.zst` ready for `pacman -U`.
 
-Everything lives in this repo — no other files needed.
+No Codespaces quota. No storage bills. No daemon on your machine.
+
+> [!TIP]
+> **Free forever on a public repo** — GitHub gives unlimited Actions minutes and free artifact storage to public repositories. A 20-minute build costs you nothing but 20 minutes of *their* CPU.
+
+---
+
+## 🔄 How it works
+
+```text
+┌─────────────────────────────┐
+│  💻 Your Arch box           │
+│  $ abuild zen-browser-bin   │
+└──────────────┬──────────────┘
+               │  1. workflow_dispatch (gh CLI)
+               ▼
+┌─────────────────────────────┐
+│  ☁️ GitHub Actions runner   │
+│  ubuntu-latest · 4 vCPU     │
+└──────────────┬──────────────┘
+               │  2. docker run archlinux:base-devel
+               ▼
+┌──────────────────────────────────────────┐
+│  🏗️ Build container (throwaway)          │
+│  pacman -Syu → paru -S --needed <pkg>    │
+│  builds the package AND its AUR deps     │
+└──────────────┬───────────────────────────┘
+               │  3. artifact upload (.pkg.tar.zst)
+               ▼
+┌─────────────────────────────┐
+│  📦 /tmp/abuild/<pkgname>/  │
+│  4. sudo pacman -U  → done  │
+└─────────────────────────────┘
+```
+
+You never install `paru`, `base-devel`, or a chroot locally. The container is destroyed when the job ends.
+
+---
+
+## 🚀 Quick start
 
 ```bash
+# 1. grab the wrapper
 git clone https://github.com/Praveensenpai/aur-builder
 install -Dm755 aur-builder/abuild ~/.local/bin/abuild
-echo 'export AUR_BUILDER_REPO=Praveensenpai/aur-builder' >> ~/.bashrc
-source ~/.bashrc
+
+# 2. verify
+command -v abuild          # ~/.local/bin/abuild
+
+# 3. build something
+abuild pfetch
 ```
 
-`~/.local/bin` is already on `PATH` on a standard Omarchy/Arch setup; check with `command -v abuild` after installing.
+That's it. The repo name is already the default — no config file, no env vars, no `.bashrc` edits.
 
-## Usage
+> [!NOTE]
+> `~/.local/bin` is on `PATH` by default on Arch/Omarchy. If `command -v abuild` prints nothing, add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc.
+
+---
+
+## 📖 Usage
 
 ```bash
-abuild zen-browser-bin            # build + install
-abuild parui some-aur-dep        # extra args = AUR deps built in the same run
-AUR_BUILDER_NOINSTALL=1 abuild x  # download only, install later
+abuild <pkgname> [aur-dep ...]
 ```
 
-Artifacts land in `/tmp/abuild/<pkgname>/` (override with `AUR_BUILDER_DL`).
-
-## How it works
-
-1. `abuild` fires `workflow_dispatch` on this repo with the package name.
-2. Runner starts `archlinux:base-devel` in Docker.
-3. Inside: `pacman -Syu`, then bootstrap `paru-bin`.
-4. `paru -S --build --needed <pkg>` — builds the package **and any AUR deps** recursively, installing into the container only.
-5. Built `.pkg.tar.zst` files are copied out as a workflow artifact.
-6. `abuild` waits for the run, downloads the artifact, runs `sudo pacman -U`.
-
-Local CPU usage: zero compilation, just the install.
-
-## Caches that make repeat builds fast
-
-| Path | Why |
+| Command | What happens |
 |---|---|
-| `.cache/pacman` | repo packages, avoids re-downloading |
-| `.cache/paru` | cloned PKGBUILDs + downloaded sources |
-| `.cache/cargo` | Rust registry for `-git`/`-rs` crates |
-| `.cache/ccache` | C/C++ object reuse |
+| `abuild zen-browser-bin` | Build + install one package |
+| `abuild some-tool libfoo-git` | Build `some-tool`, pulling in `libfoo-git` from the AUR in the same run |
+| `AUR_BUILDER_NOINSTALL=1 abuild foo` | Download only — prints the `pacman -U` command |
+| `abuild foo \| tee build.log` | Safe to background: `Ctrl-C` does **not** stop the remote build |
 
-`restore-keys` prefix-matches, so the first build of a package is cold and later ones are warm.
+Artifacts land in `/tmp/abuild/<pkgname>/`.
 
-## Timing reference
+### Environment variables
 
-Measured locally on a 4-thread i3-1115G4, cold build of a 141-dependency Rust project: **2 min 42 s**, `target/` 184 MB, cargo registry 91 MB. The Actions runner has 4 dedicated vCPUs, so expect similar or better for Rust packages, and a few minutes for C/C++ projects that take ~20 min on older hardware.
+| Variable | Default | Purpose |
+|---|---|---|
+| `AUR_BUILDER_REPO` | `Praveensenpai/aur-builder` | Point at a fork |
+| `AUR_BUILDER_WORKFLOW` | `build.yml` | Alternate workflow file |
+| `AUR_BUILDER_DL` | `/tmp/abuild` | Where artifacts are downloaded |
+| `AUR_BUILDER_NOINSTALL` | `0` | `1` = skip `pacman -U` |
 
-## Caveats
+---
 
-- **glibc/pacman version skew.** The container is `archlinux:base-devel` (latest snapshot); if your local system is behind, a built package may want newer libs and `pacman -U` will refuse. Fix: `sudo pacman -Syu` locally first.
-- **Signing.** Packages are unsigned, hence `pacman -U` rather than `-S`. If your `SigLevel` is strict you'll need a signing key; the default Arch config accepts local `-U` installs.
-- **Not a full `yay` replacement.** `abuild` takes package names, not `-Syu` semantics. Keep `yay` for routine updates; use `abuild` for the handful of packages that compile for 20 minutes.
-- **Big packages.** `timeout-minutes: 300`; artifacts are kept 3 days to stay within free storage.
-- **Version pinning.** `pacman -Syu` inside the container means builds always target latest Arch. Do not run `abuild` on a system that hasn't been updated in weeks.
+## ⚡ What makes it fast
+
+Four caches survive between runs via `actions/cache`:
+
+| Cache | Saved |
+|---|---|
+| `.cache/pacman` | Downloaded repo packages |
+| `.cache/paru` | Cloned PKGBUILDs and source tarballs |
+| `.cache/cargo` | Rust registry for `-git` / `-rs` packages |
+| `.cache/ccache` | Compiled C/C++ objects |
+
+First build of a package is cold; every later build is warm. `restore-keys` prefix-matches, so `abuild foo` benefits from `aur-` caches even before it has its own.
+
+Measured reference — cold build of a 141-dependency Rust project on a 4-thread i3-1115G4: **2 min 42 s**, `target/` 184 MB. The runner has 4 dedicated vCPUs and no thermal throttling.
+
+---
+
+## ⚠️ Caveats
+
+> [!WARNING]
+> **Version skew will bite you.** The container runs `archlinux:base-devel` at the latest snapshot. If your local system is weeks behind, the built package may demand a newer `glibc` and `pacman -U` will refuse it. Run `sudo pacman -Syu` before `abuild`.
+
+- **Unsigned packages.** Hence `pacman -U`, not `pacman -S`. The default Arch `SigLevel` accepts local installs.
+- **Not a `yay` replacement.** `abuild` takes package names, not `-Syu` semantics. Keep `yay` for routine updates and use `abuild` for the handful of packages that compile for 20 minutes.
+- **Job timeout is 5 hours.** Artifacts are kept 3 days to stay inside free storage.
+- **Public repo required** for the free tier. A private repo burns your 2,000 monthly Actions minutes — and a single large package can eat a chunk of that.
+
+---
+
+## 🔧 Running your own
+
+Fork this repo and set `AUR_BUILDER_REPO=<you>/aur-builder`. The workflow takes two inputs:
+
+| Input | Required | Meaning |
+|---|---|---|
+| `pkgname` | yes | AUR package to build |
+| `deps` | no | Space-separated extra AUR packages built in the same run |
+
+You can also trigger it from the web UI: **Actions → build-aur → Run workflow**.
+
+---
+
+## 📜 License
+
+MIT — do whatever you want.
+© Praveen Senpai ([@Praveensenpai](https://github.com/Praveensenpai))

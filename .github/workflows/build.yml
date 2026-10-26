@@ -1,6 +1,6 @@
 name: build-aur
 
-# Public repo => unlimited Actions minutes, 4-core runner, zero Codespaces quota.
+# Public repo => unlimited Actions minutes, 4-core runner, zero local CPU.
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +8,7 @@ on:
         description: "AUR package name (e.g. zen-browser-bin)"
         required: true
       deps:
-        description: "Extra AUR deps to build first (space separated, optional)"
+        description: "Extra AUR packages to build in the same run (space separated)"
         required: false
         default: ""
 
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
-      - name: Cache pacman/paru/ccache/cargo
+      - name: Cache pacman / paru / ccache / cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -50,37 +50,41 @@ jobs:
               set -euo pipefail
               shopt -s nullglob
 
-              # snapshot image has no db; full upgrade avoids partial-upgrade breakage
-              pacman -Syu --noconfirm --needed sudo git &>/dev/null
+              # Snapshot image ships without a db; a full upgrade avoids
+              # partial-upgrade breakage when deps get pulled in.
+              pacman -Syu --noconfirm --needed sudo git ccache &>/dev/null
 
+              # makepkg refuses to run as root.
               id builder &>/dev/null || useradd -m builder
               echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
               chmod 0440 /etc/sudoers.d/builder
-              chown -R builder:builder /home/builder
 
-              # --- bootstrap paru (from AUR, -bin so no compile) ---
+              mkdir -p /tmp/pkgs /tmp/makepkg
+              chown -R builder:builder /home/builder /tmp/pkgs /tmp/makepkg
+
+              # Build tuning belongs in ~/.makepkg.conf, NOT paru.conf.
+              {
+                echo "MAKEFLAGS=\"-j$(nproc)\""
+                echo "BUILDDIR=/tmp/makepkg"
+                echo "PKGDEST=/tmp/pkgs"
+                echo "CCACHE_DIR=/home/builder/.ccache"
+              } > /home/builder/.makepkg.conf
+              chown builder:builder /home/builder/.makepkg.conf
+
+              # Bootstrap paru (-bin, nothing is compiled).
               if ! command -v paru &>/dev/null; then
                 su builder -c "cd /tmp && git clone --depth=1 https://aur.archlinux.org/paru-bin.git && cd paru-bin && makepkg -si --noconfirm"
               fi
 
-              # parallel builds, ccache
-              {
-                echo "MAKEFLAGS=-j$(nproc)"
-                echo "BUILDDIR=/tmp/makepkg"
-                echo "CCACHE_DIR=/home/builder/.ccache"
-              } >> /home/builder/.config/paru/paru.conf
-
-              # --norebuild: reuse cached clones, --build: do not install
-              su builder -c "paru -S --noconfirm --needed --build --norebuild $EXTRADEPS $PKGNAME" || {
+              # Builds the target and any AUR deps; installs only in the container.
+              su builder -c "cd /tmp && paru -S --noconfirm --needed $EXTRADEPS $PKGNAME" || {
                 echo "--- paru failed" >&2
                 exit 1
               }
 
-              # paru leaves built packages in its clone cache
-              mapfile -t pkgs < <(find /home/builder/.cache/paru/clone -name "*.pkg.tar.*" -type f)
+              mapfile -t pkgs < <(find /tmp/pkgs -name "*.pkg.tar.*" -type f)
               (( ${#pkgs[@]} )) || { echo "error: no packages produced" >&2; exit 1; }
 
-              printf "%s\n" "${pkgs[@]}" > /tmp/built.txt
               cp -v "${pkgs[@]}" /out/
               chown -R "$HOST_UID:$HOST_GID" /out
             '
