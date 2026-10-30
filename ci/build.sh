@@ -12,6 +12,26 @@ EXTRADEPS="${EXTRADEPS:-}"
 HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
 
+# Mount points shared with the runner. Root creates files here, so they must
+# be handed back to the runner's uid or actions/cache fails with
+# "tar: .cache/...: Cannot open: Permission denied" and silently drops the cache.
+CACHE_DIRS=(
+  /var/cache/pacman/pkg
+  /parucache
+  /home/builder/.cache/paru
+  /home/builder/.ccache
+  /home/builder/.cargo
+)
+
+reclaim() {
+  local d
+  for d in "${CACHE_DIRS[@]}" /out; do
+    [[ -e "$d" ]] || continue
+    chown -R "${HOST_UID}:${HOST_GID}" "$d" 2>/dev/null || true
+  done
+}
+trap reclaim EXIT
+
 # Snapshot image ships without a db; a full upgrade avoids partial-upgrade
 # breakage when makepkg --syncdeps pulls dependencies.
 pacman -Syu --noconfirm --needed sudo git ccache rust &>/dev/null
@@ -30,16 +50,15 @@ chown -R builder:builder /home/builder /parucache /tmp/pkgs /tmp/makepkg
 if ! command -v paru &>/dev/null; then
   cached=(/parucache/paru-[0-9]*.pkg.tar.zst)
   if (( ${#cached[@]} )); then
-    echo "==> installing cached paru package"
+    echo "==> installing cached paru package (${cached[0]##*/})"
     pacman -U --noconfirm "${cached[0]}"
   else
-    echo "==> building paru from source"
+    echo "==> building paru from source (cold cache, ~4 min)"
     su builder -c 'cd /tmp && rm -rf paru && git clone --depth=1 https://aur.archlinux.org/paru.git && cd paru && makepkg -sf --noconfirm'
     mapfile -t ppkgs < <(find /tmp/paru -maxdepth 1 -name 'paru-[0-9]*.pkg.tar.zst' -type f)
     (( ${#ppkgs[@]} )) || { echo "error: paru build produced no package" >&2; exit 1; }
     pacman -U --noconfirm "${ppkgs[0]}"
     cp -v "${ppkgs[0]}" /parucache/
-    chown "${HOST_UID}:${HOST_GID}" /parucache/*.pkg.tar.zst
   fi
 fi
 paru --version
@@ -50,6 +69,7 @@ paru --version
   echo "BUILDDIR=/tmp/makepkg"
   echo "PKGDEST=/tmp/pkgs"
   echo "CCACHE_DIR=/home/builder/.ccache"
+  echo "OPTIONS+=(!debug)"
 } > /home/builder/.makepkg.conf
 chown builder:builder /home/builder/.makepkg.conf
 
@@ -77,7 +97,15 @@ su builder -c "cd /tmp && paru -S --aur --noconfirm --needed ${EXTRADEPS} ${PKGN
 
 mapfile -t pkgs < <(find /tmp/pkgs /home/builder/.cache/paru/clone \
                       -name '*.pkg.tar.*' -type f 2>/dev/null)
-(( ${#pkgs[@]} )) || { echo "error: no packages produced" >&2; exit 1; }
 
-cp -v "${pkgs[@]}" /out/
-chown -R "${HOST_UID}:${HOST_GID}" /out
+# Debug symbol packages are huge and useless for a normal install.
+kept=()
+for p in "${pkgs[@]}"; do
+  [[ "${p##*/}" == *-debug-* ]] && continue
+  kept+=("$p")
+done
+
+(( ${#kept[@]} )) || { echo "error: no packages produced" >&2; exit 1; }
+
+cp -v "${kept[@]}" /out/
+echo "==> produced ${#kept[@]} package(s)"

@@ -28,7 +28,9 @@ jobs:
             .cache/paru-pkg
             .cache/ccache
             .cache/cargo
-          key: aur-${{ inputs.pkgname }}-${{ github.run_id }}
+          # Stable key: a run_id here would create a fresh cache every run and
+          # never restore (that is why paru was recompiled each time).
+          key: aur-${{ inputs.pkgname }}-${{ hashFiles('ci/build.sh') }}
           restore-keys: |
             aur-${{ inputs.pkgname }}-
             aur-
