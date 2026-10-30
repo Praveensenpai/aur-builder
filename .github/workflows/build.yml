@@ -98,8 +98,8 @@ jobs:
               # -> extra/pfetch-rs), installs a prebuilt binary and builds nothing.
               if ! curl -sf --max-time 20 \
                    "https://aur.archlinux.org/rpc/v5/info?arg[]=$PKGNAME" \
-                   | grep -q '"resultcount":[[:space:]]*1'; then
-                echo "error: '$PKGNAME' is not in the AUR." >&2
+                   | grep -qE resultcount.:[[:space:]]*[1-9]; then
+                echo "error: $PKGNAME is not in the AUR." >&2
                 echo "       Install repo packages with: sudo pacman -S $PKGNAME" >&2
                 exit 1
               fi
