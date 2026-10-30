@@ -46,6 +46,16 @@ No Codespaces quota. No storage bills. No daemon on your machine.
 
 You never install `paru`, `base-devel`, or a chroot locally. The container is destroyed when the job ends.
 
+### Repo layout
+
+| File | Runs on | Role |
+|---|---|---|
+| `abuild` | your machine | Dispatches the workflow, downloads the artifact, runs `pacman -U` |
+| `.github/workflows/build.yml` | Actions runner | Spins up the container, uploads artifacts |
+| `ci/build.sh` | inside the container | Bootstraps `paru`, validates the package name, builds |
+
+Keeping the build logic in `ci/build.sh` means it runs as a normal script instead of a string nested inside YAML — easier to read, lint (`bash -n`), and modify.
+
 ---
 
 ## 🍴 Step 0 — Fork this repo (required)
