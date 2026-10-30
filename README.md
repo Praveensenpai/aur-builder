@@ -139,7 +139,23 @@ Five caches survive between runs via `actions/cache`:
 
 First build of a package is cold; every later build is warm. `restore-keys` prefix-matches, so `abuild foo` benefits from `aur-` caches even before it has its own.
 
-Measured reference — cold build of a 141-dependency Rust project on a 4-thread i3-1115G4: **2 min 42 s**, `target/` 184 MB. The runner has 4 dedicated vCPUs and no thermal throttling.
+### Measured timings
+
+First run ever (nothing cached), `yay-bin` on `ubuntu-latest`:
+
+| Phase | Time |
+|---|---|
+| Runner setup + cache restore | ~25 s |
+| `pacman -Syu` + install `rust`/`ccache` | ~20 s |
+| Build `paru` from source (cached afterwards) | **4 min 34 s** |
+| Build `yay-bin` | ~30 s |
+| Artifact upload | ~2 s |
+| **Total** | **5 min 35 s** |
+
+Every later run skips the 4.5-minute `paru` compile, so a small package lands in well under a minute of real work. Local reference for scale: a 141-dependency Rust project takes **2 min 42 s** on a 4-thread i3-1115G4.
+
+> [!NOTE]
+> `-debug` packages (debug symbols, often 4–5 MB each) are filtered out of the artifact — they are useless for a normal install and would triple the download.
 
 ---
 
