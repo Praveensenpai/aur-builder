@@ -55,6 +55,16 @@ jobs:
             archlinux:base-devel \
             bash /ci/build.sh
 
+      # Artifact filenames cannot contain ':' (epoch separator in pacman pkg names).
+      # Rename any such files before upload; pacman reads epoch from pkg metadata, not the filename.
+      - name: Sanitize pkg filenames (strip epoch colons)
+        run: |
+          set -euo pipefail
+          for f in out/*.pkg.tar.*; do
+            safe="${f//:/_}"
+            [[ "$f" != "$safe" ]] && mv -- "$f" "$safe"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ inputs.pkgname }}-${{ github.run_id }}
