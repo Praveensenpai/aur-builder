@@ -1,4 +1,5 @@
 name: build-aur
+run-name: "build: ${{ inputs.pkgname }}${{ inputs.deps != '' && format(' (+ {0})', inputs.deps) || '' }}"
 
 # Public repo => unlimited Actions minutes, 4-core runner, zero local CPU.
 on:

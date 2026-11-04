@@ -3,82 +3,385 @@
 #
 #   abuild <pkgname> [aur-dep...]
 #   abuild zen-browser-bin
-#   abuild some-tool other-dep      # deps built in the same run
+#   abuild some-tool other-dep
 #
-# Requires: gh (authenticated), sudo/pacman, a fork of aur-builder.
-# Env: AUR_BUILDER_REPO     default <your-gh-login>/aur-builder
-#      AUR_BUILDER_WORKFLOW default build.yml
-#      AUR_BUILDER_DL       default /tmp/abuild
-#      AUR_BUILDER_NOINSTALL=1  download only, skip pacman -U
+# Options:
+#   -n, --no-install  Download package only, skip local installation
+#   -h, --help        Show usage information
+#
+# Environment:
+#   AUR_BUILDER_REPO        Target repo (default: <login>/aur-builder)
+#   AUR_BUILDER_WORKFLOW    Workflow file (default: build.yml)
+#   AUR_BUILDER_DL          Download dir (default: /tmp/abuild)
+#   AUR_BUILDER_NOINSTALL=1 Download only, skip pacman -U
+#   NO_COLOR=1              Disable colored output
+
 set -euo pipefail
 
-# Default to YOUR fork, never someone else's account.
-REPO="${AUR_BUILDER_REPO:-}"
-if [[ -z "$REPO" ]]; then
-  _login="$(gh api user --jq .login 2>/dev/null || true)"
-  [[ -n "$_login" ]] || { echo "abuild: gh not authenticated (run: gh auth login)" >&2; exit 1; }
-  REPO="$_login/aur-builder"
+# --- Visual Styling & TTY Detection ---
+USE_COLOR=0
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]; then
+  USE_COLOR=1
 fi
-WORKFLOW="${AUR_BUILDER_WORKFLOW:-build.yml}"
-DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
 
-die() { echo "abuild: $*" >&2; exit 1; }
-[[ $# -ge 1 ]] || die "usage: abuild <pkgname> [aur-dep...]"
+if (( USE_COLOR )); then
+  C_RESET="\e[0m"
+  C_BOLD="\e[1m"
+  C_DIM="\e[2m"
+  C_CYAN="\e[36m"
+  C_GREEN="\e[32m"
+  C_RED="\e[31m"
+  C_YELLOW="\e[33m"
+  C_MAGENTA="\e[35m"
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_CYAN=""
+  C_GREEN=""
+  C_RED=""
+  C_YELLOW=""
+  C_MAGENTA=""
+fi
 
-# Verify a package exists on the AUR before wasting a remote CI run.
-aur_check() {
-  local pkg="$1"
-  local found
-  found="$(curl -sf "https://aur.archlinux.org/rpc/v5/info?arg[]=${pkg}" \
-    | grep -o '"resultcount":[0-9]*' | grep -o '[0-9]*' || true)"
-  [[ "${found:-0}" -ge 1 ]] || die "'${pkg}' not found on AUR"
+# --- Spinner State ---
+_SPIN_PID=""
+_SPIN_MSG_FILE=""
+
+spin_start() {
+  local msg="$1"
+  if (( ! USE_COLOR )); then
+    printf "  ... %s\n" "$msg"
+    return 0
+  fi
+
+  printf "\e[?25l" # Hide cursor
+  _SPIN_MSG_FILE="$(mktemp -t abuild_spin.XXXXXX)"
+  printf "%s" "$msg" > "$_SPIN_MSG_FILE"
+
+  (
+    local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local count=${#frames[@]}
+    local i=0
+    while true; do
+      local text
+      if [[ -f "$_SPIN_MSG_FILE" ]]; then
+        text="$(<"$_SPIN_MSG_FILE")"
+      else
+        break
+      fi
+      printf "\r\e[2K  \e[36m%s\e[0m %s" "${frames[i]}" "$text"
+      i=$(( (i + 1) % count ))
+      sleep 0.07
+    done
+  ) &
+  _SPIN_PID=$!
 }
 
-main_pkg="$1"; shift
-deps="${*:-}"
+spin_set() {
+  local msg="$1"
+  if [[ -n "$_SPIN_PID" ]] && [[ -n "$_SPIN_MSG_FILE" ]] && [[ -f "$_SPIN_MSG_FILE" ]]; then
+    printf "%s" "$msg" > "$_SPIN_MSG_FILE"
+  elif (( ! USE_COLOR )); then
+    printf "  ... %s\n" "$msg"
+  fi
+}
 
-echo "==> checking AUR for $main_pkg${deps:+ (+ $deps)}..."
-aur_check "$main_pkg"
-for dep in $deps; do
-  aur_check "$dep"
+spin_stop() {
+  local status="${1:-ok}"
+  local msg="$2"
+  if [[ -n "$_SPIN_PID" ]]; then
+    kill "$_SPIN_PID" 2>/dev/null || true
+    wait "$_SPIN_PID" 2>/dev/null || true
+    _SPIN_PID=""
+  fi
+  if [[ -n "$_SPIN_MSG_FILE" ]]; then
+    rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true
+    _SPIN_MSG_FILE=""
+  fi
+
+  if (( USE_COLOR )); then
+    printf "\e[?25h\r\e[2K"
+  fi
+
+  case "$status" in
+    ok)   printf "  ${C_GREEN}✔${C_RESET} %s\n" "$msg" ;;
+    fail) printf "  ${C_RED}✖${C_RESET} %s\n" "$msg" ;;
+    warn) printf "  ${C_YELLOW}⚠${C_RESET} %s\n" "$msg" ;;
+    *)    printf "    %s\n" "$msg" ;;
+  esac
+}
+
+# --- Cleanup & Interrupt Handling ---
+cleanup() {
+  local exit_code=$?
+  if (( USE_COLOR )); then
+    printf "\e[?25h" 2>/dev/null || true
+  fi
+  if [[ -n "${_SPIN_PID:-}" ]]; then
+    kill "$_SPIN_PID" 2>/dev/null || true
+    wait "$_SPIN_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${_SPIN_MSG_FILE:-}" && -f "$_SPIN_MSG_FILE" ]]; then
+    rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true
+  fi
+  exit "$exit_code"
+}
+trap cleanup EXIT
+
+on_interrupt() {
+  if (( USE_COLOR )); then
+    printf "\e[?25h\r\e[2K"
+  fi
+  if [[ -n "${_SPIN_PID:-}" ]]; then
+    kill "$_SPIN_PID" 2>/dev/null || true
+    wait "$_SPIN_PID" 2>/dev/null || true
+  fi
+  printf "\n  ${C_YELLOW}⚠${C_RESET} Interrupted by user (Ctrl-C)\n"
+  if [[ -n "${CURRENT_RUN_URL:-}" ]]; then
+    printf "    ${C_DIM}Build continues remotely at:${C_RESET} %s\n" "$CURRENT_RUN_URL"
+  fi
+  exit 130
+}
+trap on_interrupt INT TERM HUP
+
+# --- Helper Utilities ---
+die() {
+  spin_stop fail "$*"
+  exit 1
+}
+
+format_time() {
+  local ms="$1"
+  if (( ms < 1000 )); then
+    printf "%dms" "$ms"
+  else
+    local s=$(( ms / 1000 ))
+    if (( s < 60 )); then
+      local frac=$(( (ms % 1000) / 100 ))
+      printf "%d.%ds" "$s" "$frac"
+    else
+      local m=$(( s / 60 ))
+      local rem_s=$(( s % 60 ))
+      printf "%dm %02ds" "$m" "$rem_s"
+    fi
+  fi
+}
+
+now_ms() {
+  local ns
+  ns="$(date +%s%N)"
+  printf "%d" "$(( ns / 1000000 ))"
+}
+
+# --- CLI Option Parsing ---
+NO_INSTALL="${AUR_BUILDER_NOINSTALL:-0}"
+REPO="${AUR_BUILDER_REPO:-}"
+WORKFLOW="${AUR_BUILDER_WORKFLOW:-build.yml}"
+DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
+CURRENT_RUN_URL=""
+
+usage() {
+  cat <<EOF
+Usage: abuild [options] <pkgname> [aur-dep...]
+
+Build AUR packages remotely on GitHub Actions and install locally.
+
+Options:
+  -n, --no-install    Download package without running pacman -U
+  -r, --repo <repo>   GitHub target repository (default: <login>/aur-builder)
+  -h, --help          Show this help message
+
+Environment:
+  AUR_BUILDER_REPO        GitHub repository
+  AUR_BUILDER_WORKFLOW    Workflow file name (default: build.yml)
+  AUR_BUILDER_DL          Download destination (default: /tmp/abuild)
+  AUR_BUILDER_NOINSTALL=1 Skip local pacman installation
+EOF
+  exit 0
+}
+
+declare -a PKG_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    -n|--no-install)
+      NO_INSTALL=1
+      shift
+      ;;
+    -r|--repo)
+      [[ $# -ge 2 ]] || { echo "abuild: missing argument for $1" >&2; exit 1; }
+      REPO="$2"
+      shift 2
+      ;;
+    *)
+      PKG_ARGS+=("$1")
+      shift
+      ;;
+  esac
 done
 
-echo "==> dispatching $main_pkg${deps:+ (+ $deps)} to $REPO"
-gh workflow run "$WORKFLOW" -R "$REPO" \
-  -f "pkgname=$main_pkg" -f "deps=$deps" \
-  || die "dispatch failed (check repo name, workflow name, gh auth status)"
+[[ ${#PKG_ARGS[@]} -ge 1 ]] || {
+  echo "abuild: error: missing package name" >&2
+  echo "Try 'abuild --help' for usage." >&2
+  exit 1
+}
 
-# gh returns before the run object exists; poll briefly for it
+MAIN_PKG="${PKG_ARGS[0]}"
+declare -a EXTRA_DEPS=("${PKG_ARGS[@]:1}")
+
+# --- Header ---
+printf "\n  ${C_BOLD}${C_CYAN}abuild${C_RESET} ${C_DIM}· AUR Remote Builder${C_RESET}\n\n"
+
+# --- Authentication & Repo Check ---
+if [[ -z "$REPO" ]]; then
+  _login="$(gh api user --jq .login 2>/dev/null || true)"
+  if [[ -z "$_login" ]]; then
+    printf "  ${C_RED}✖${C_RESET} GitHub CLI is not authenticated\n" >&2
+    printf "    ${C_DIM}Run 'gh auth login' to authenticate.${C_RESET}\n" >&2
+    exit 1
+  fi
+  REPO="$_login/aur-builder"
+fi
+
+# --- Step 1: AUR Preflight Check ---
+spin_start "Resolving packages on AUR..."
+t_start=$(now_ms)
+
+aur_query_url="https://aur.archlinux.org/rpc/v5/info"
+first=1
+for pkg in "${PKG_ARGS[@]}"; do
+  if (( first )); then
+    aur_query_url+="?arg[]=${pkg}"
+    first=0
+  else
+    aur_query_url+="&arg[]=${pkg}"
+  fi
+done
+
+aur_res="$(curl -sf "$aur_query_url" || true)"
+if [[ -z "$aur_res" ]]; then
+  die "Failed to connect to AUR RPC service"
+fi
+
+for pkg in "${PKG_ARGS[@]}"; do
+  pkg_ver="$(printf "%s" "$aur_res" | jq -r --arg p "$pkg" '.results[]? | select(.Name == $p) | .Version' 2>/dev/null || true)"
+  if [[ -z "$pkg_ver" ]]; then
+    die "Package '${C_BOLD}${pkg}${C_RESET}' was not found on AUR"
+  fi
+done
+
+t_aur=$(( $(now_ms) - t_start ))
+time_str="$(format_time "$t_aur")"
+if [[ ${#EXTRA_DEPS[@]} -eq 0 ]]; then
+  main_ver="$(printf "%s" "$aur_res" | jq -r --arg p "$MAIN_PKG" '.results[]? | select(.Name == $p) | .Version' 2>/dev/null || true)"
+  spin_stop ok "Resolved ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}v${main_ver}${C_RESET} ${C_DIM}(${time_str})${C_RESET}"
+else
+  spin_stop ok "Resolved ${C_BOLD}${#PKG_ARGS[@]}${C_RESET} packages on AUR ${C_DIM}(${time_str})${C_RESET}"
+fi
+
+# --- Step 2: Dispatch GitHub Workflow ---
+spin_start "Dispatching build to ${C_BOLD}${REPO}${C_RESET}..."
+t_start=$(now_ms)
+
+deps_joined="${EXTRA_DEPS[*]:-}"
+gh workflow run "$WORKFLOW" -R "$REPO" \
+  -f "pkgname=$MAIN_PKG" -f "deps=$deps_joined" \
+  || die "Workflow dispatch failed (verify repo permissions & workflow name)"
+
+# Poll for the dispatched run ID
 run_id=""
-for _ in {1..15}; do
+for _ in {1..20}; do
   run_id="$(gh run list -R "$REPO" -w "$WORKFLOW" -L 1 \
               --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
   [[ -n "$run_id" ]] && break
-  sleep 2
+  sleep 1.5
 done
-[[ -n "$run_id" ]] || die "no run appeared after dispatch"
+[[ -n "$run_id" ]] || die "Dispatched run did not appear in GitHub Actions"
 
-echo "==> https://github.com/$REPO/actions/runs/$run_id"
-echo "==> waiting (Ctrl-C is safe; the build continues remotely)"
+CURRENT_RUN_URL="https://github.com/$REPO/actions/runs/$run_id"
+t_disp=$(( $(now_ms) - t_start ))
+spin_stop ok "Queued run ${C_BOLD}#${run_id}${C_RESET} ${C_DIM}($(format_time "$t_disp"))${C_RESET}"
+printf "    ${C_DIM}↳ %s${C_RESET}\n" "$CURRENT_RUN_URL"
 
-gh run watch "$run_id" -R "$REPO" --exit-status --interval 15 \
-  || die "build failed — logs: gh run view $run_id -R $REPO --log-failed"
+# --- Step 3: Monitor Remote Build Progress ---
+spin_start "Building on GitHub Actions ${C_DIM}(starting...)${C_RESET}"
+t_build_start=$(now_ms)
 
-dest="$DL_DIR/$main_pkg"
-rm -rf "$dest"; mkdir -p "$dest"
-gh run download "$run_id" -R "$REPO" -D "$dest" >/dev/null
+while true; do
+  view_json="$(gh run view "$run_id" -R "$REPO" --json status,conclusion,jobs 2>/dev/null || true)"
+  if [[ -n "$view_json" ]]; then
+    run_status="$(printf "%s" "$view_json" | jq -r '.status // empty' 2>/dev/null || true)"
+    run_conclusion="$(printf "%s" "$view_json" | jq -r '.conclusion // empty' 2>/dev/null || true)"
 
-mapfile -t pkgs < <(find "$dest" -name '*.pkg.tar.*' -type f | sort)
-(( ${#pkgs[@]} )) || die "artifact contained no packages"
+    if [[ "$run_status" == "completed" ]]; then
+      t_build=$(( $(now_ms) - t_build_start ))
+      b_time="$(format_time "$t_build")"
+      if [[ "$run_conclusion" == "success" ]]; then
+        spin_stop ok "Built ${C_BOLD}${MAIN_PKG}${C_RESET} successfully ${C_DIM}(${b_time})${C_RESET}"
+        break
+      else
+        spin_stop fail "Remote build finished with ${C_RED}${run_conclusion}${C_RESET} ${C_DIM}(${b_time})${C_RESET}"
+        printf "\n    ${C_RED}Build logs:${C_RESET} gh run view %s -R %s --log-failed\n\n" "$run_id" "$REPO"
+        exit 1
+      fi
+    fi
 
-echo "==> built:"
-printf '    %s\n' "${pkgs[@]##*/}"
+    # Extract current active step or job status
+    active_step="$(printf "%s" "$view_json" | jq -r '
+      .jobs[0].steps[]? | select(.status == "in_progress") | .name
+    ' 2>/dev/null || true)"
 
-if [[ "${AUR_BUILDER_NOINSTALL:-0}" == 1 ]]; then
-  echo "==> AUR_BUILDER_NOINSTALL=1, skipping install"
-  echo "    install manually: sudo pacman -U ${pkgs[*]}"
+    t_cur=$(( $(now_ms) - t_build_start ))
+    cur_time="$(format_time "$t_cur")"
+    if [[ -n "$active_step" ]]; then
+      spin_set "Building on GitHub Actions ${C_DIM}(${active_step} · ${cur_time})${C_RESET}"
+    else
+      spin_set "Building on GitHub Actions ${C_DIM}(${run_status} · ${cur_time})${C_RESET}"
+    fi
+  fi
+  sleep 2.5
+done
+
+# --- Step 4: Download Artifacts ---
+spin_start "Downloading package artifacts..."
+t_start=$(now_ms)
+dest="$DL_DIR/$MAIN_PKG"
+rm -rf "$dest"
+mkdir -p "$dest"
+
+gh run download "$run_id" -R "$REPO" -D "$dest" >/dev/null \
+  || die "Failed to download build artifact from GitHub"
+
+declare -a pkgs=()
+while IFS= read -r -d '' f; do
+  pkgs+=("$f")
+done < <(find "$dest" -name '*.pkg.tar.*' -type f -print0 | sort -z)
+
+(( ${#pkgs[@]} )) || die "Downloaded artifact contained no package files (.pkg.tar.*)"
+
+t_dl=$(( $(now_ms) - t_start ))
+total_size="$(du -ch "${pkgs[@]}" | awk 'END{print $1}')"
+spin_stop ok "Downloaded ${C_BOLD}${#pkgs[@]}${C_RESET} package(s) ${C_DIM}(${total_size}, $(format_time "$t_dl"))${C_RESET}"
+
+for p in "${pkgs[@]}"; do
+  p_name="${p##*/}"
+  p_size="$(du -h "$p" | cut -f1)"
+  printf "    ${C_DIM}↳ %s (%s)${C_RESET}\n" "$p_name" "$p_size"
+done
+
+# --- Step 5: Local Installation ---
+if (( NO_INSTALL )); then
+  printf "\n  ${C_YELLOW}ℹ${C_RESET} ${C_BOLD}--no-install${C_RESET} flag set; skipping pacman -U\n"
+  printf "    ${C_DIM}Install manually:${C_RESET} sudo pacman -U %s\n\n" "${pkgs[*]}"
   exit 0
 fi
 
+printf "\n  ${C_BOLD}Installing with pacman...${C_RESET}\n\n"
+t_install_start=$(now_ms)
 sudo pacman -U --noconfirm "${pkgs[@]}"
-echo "==> done: $main_pkg"
+t_install=$(( $(now_ms) - t_install_start ))
+
+printf "\n  ${C_GREEN}✔${C_RESET} ${C_BOLD}All done!${C_RESET} Installed ${C_BOLD}%s${C_RESET} ${C_DIM}($(format_time "$t_install"))${C_RESET}\n\n"
