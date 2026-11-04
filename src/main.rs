@@ -31,15 +31,19 @@ fn run() -> Result<()> {
         None => github::get_default_repo()?,
     };
 
-    if args.list || matches!(args.command, Some(cli::Commands::List)) {
-        let runs = github::list_runs(&repo, workflow, 12)?;
+    if args.list {
+        let runs = github::list_runs(&repo, workflow, args.limit)?;
         ui::render_runs_table(&runs);
         return Ok(());
     }
 
     if let Some(cmd) = args.command {
         match cmd {
-            cli::Commands::List => unreachable!(),
+            cli::Commands::List { limit } => {
+                let runs = github::list_runs(&repo, workflow, limit)?;
+                ui::render_runs_table(&runs);
+                return Ok(());
+            }
             cli::Commands::Attach { run_id, no_install } => {
                 let id = resolve_run_id(&repo, workflow, run_id)?;
                 handle_attach(&repo, id, no_install, total_start)?;

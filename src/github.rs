@@ -27,6 +27,10 @@ pub struct GhRunListItem {
     pub conclusion: Option<String>,
     #[serde(rename = "displayTitle")]
     pub display_title: Option<String>,
+    #[serde(rename = "startedAt")]
+    pub started_at: Option<String>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,7 +79,7 @@ pub fn list_runs(repo: &str, workflow: &str, limit: usize) -> Result<Vec<GhRunLi
             "-L",
             &limit.to_string(),
             "--json",
-            "databaseId,status,conclusion,displayTitle,createdAt,url",
+            "databaseId,status,conclusion,displayTitle,startedAt,updatedAt",
         ])
         .output()
         .context("Failed to run 'gh run list'")?;

@@ -23,7 +23,7 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   fn verify_aur_packages (packages : & [String]) -> Result < HashMap < String , String > >
   ```
 
-### `src/cli.rs` (Role: cli, Lines: 56)
+### `src/cli.rs` (Role: cli, Lines: 64)
 - **Responsibility**: Core cli logic in src/cli.rs
 - **Imports**: use clap :: { Parser , Subcommand } 
 - **Types & Enums**:
@@ -32,7 +32,7 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   pub enum Commands
   ```
 
-### `src/github.rs` (Role: general, Lines: 276)
+### `src/github.rs` (Role: general, Lines: 280)
 - **Responsibility**: Core general logic in src/github.rs
 - **Imports**: use anyhow :: { Context , Result , bail } , use indicatif :: ProgressBar , use serde :: Deserialize , use std :: path :: { Path , PathBuf } , use std :: process :: Command , use std :: thread :: sleep , use std :: time :: { Duration , Instant } , use crate :: ui :: format_duration 
 - **Types & Enums**:
@@ -60,13 +60,13 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   fn extract_pkg_name (first_pkg : & Path) -> Option < String >
   ```
 
-### `src/main.rs` (Role: general, Lines: 210)
+### `src/main.rs` (Role: general, Lines: 214)
 - **Responsibility**: Core general logic in src/main.rs
 - **Imports**: use anyhow :: { Context , Result , bail } , use clap :: Parser , use console :: style , use std :: path :: PathBuf , use std :: process :: ExitCode , use std :: time :: Instant 
 
-### `src/ui.rs` (Role: tui, Lines: 103)
+### `src/ui.rs` (Role: tui, Lines: 162)
 - **Responsibility**: Core tui logic in src/ui.rs
-- **Imports**: use console :: style , use indicatif :: { ProgressBar , ProgressStyle } , use std :: time :: Duration , use crate :: github :: GhRunListItem 
+- **Imports**: use chrono :: { DateTime , Local } , use console :: style , use indicatif :: { ProgressBar , ProgressStyle } , use std :: time :: Duration , use crate :: github :: GhRunListItem 
 - **Public Functions & Signatures**:
   ```rust
   fn create_spinner (msg : & str) -> ProgressBar

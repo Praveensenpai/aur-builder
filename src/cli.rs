@@ -30,6 +30,10 @@ pub struct Cli {
     #[arg(short = 'l', long = "list")]
     pub list: bool,
 
+    /// Maximum number of runs to display when listing (default: 15)
+    #[arg(short = 'L', long = "limit", default_value_t = 15)]
+    pub limit: usize,
+
     /// Download package only, skip local pacman installation
     #[arg(short = 'n', long = "no-install")]
     pub no_install: bool,
@@ -42,7 +46,11 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// List all running and recent build instances
-    List,
+    List {
+        /// Maximum number of runs to display (default: 15)
+        #[arg(short = 'L', long = "limit", default_value_t = 15)]
+        limit: usize,
+    },
     /// Attach to an existing or background build run (default: latest active)
     Attach {
         /// Specific run ID to attach to
