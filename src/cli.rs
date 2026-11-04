@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(short = 'a', long = "attach", value_name = "RUN_ID", num_args = 0..=1)]
     pub attach: Option<Option<u64>>,
 
+    /// Force full remote build even if up to date, in binary repo, or cached
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+
     /// List running and recent build instances
     #[arg(short = 'l', long = "list")]
     pub list: bool,

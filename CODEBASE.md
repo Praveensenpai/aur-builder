@@ -23,7 +23,7 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   fn verify_aur_packages (packages : & [String]) -> Result < HashMap < String , String > >
   ```
 
-### `src/cli.rs` (Role: cli, Lines: 64)
+### `src/cli.rs` (Role: cli, Lines: 68)
 - **Responsibility**: Core cli logic in src/cli.rs
 - **Imports**: use clap :: { Parser , Subcommand } 
 - **Types & Enums**:
@@ -32,7 +32,7 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   pub enum Commands
   ```
 
-### `src/github.rs` (Role: general, Lines: 280)
+### `src/github.rs` (Role: general, Lines: 325)
 - **Responsibility**: Core general logic in src/github.rs
 - **Imports**: use anyhow :: { Context , Result , bail } , use indicatif :: ProgressBar , use serde :: Deserialize , use std :: path :: { Path , PathBuf } , use std :: process :: Command , use std :: thread :: sleep , use std :: time :: { Duration , Instant } , use crate :: ui :: format_duration 
 - **Types & Enums**:
@@ -41,6 +41,7 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   ```
 - **Public Functions & Signatures**:
   ```rust
+  fn find_existing_artifact (repo : & str , pkgname : & str) -> Result < Option < u64 > >
   fn get_default_repo () -> Result < String >
   fn list_runs (repo : & str , workflow : & str , limit : usize) -> Result < Vec < GhRunListItem > >
   fn find_latest_active_or_recent_run (repo : & str , workflow : & str) -> Result < Option < u64 > >
@@ -50,17 +51,24 @@ Entrypoint ──> CLI/Parser ──> Domain Logic ──> Infra/IO
   fn download_artifacts (repo : & str , run_id : u64 , dest : & Path) -> Result < Vec < PathBuf > >
   ```
 
-### `src/install.rs` (Role: general, Lines: 50)
+### `src/install.rs` (Role: general, Lines: 109)
 - **Responsibility**: Core general logic in src/install.rs
 - **Imports**: use anyhow :: { Context , Result , bail } , use std :: path :: { Path , PathBuf } , use std :: process :: Command 
+- **Types & Enums**:
+  ```rust
+  pub struct BinaryRepoInfo
+  ```
 - **Public Functions & Signatures**:
   ```rust
+  fn check_installed_version (pkgname : & str) -> Option < String >
+  fn check_binary_repo (pkgname : & str) -> Option < BinaryRepoInfo >
+  fn install_repo_package (pkgname : & str) -> Result < () >
   fn calculate_total_size (pkgs : & [PathBuf]) -> u64
   fn install_packages (pkgs : & [PathBuf]) -> Result < () >
   fn extract_pkg_name (first_pkg : & Path) -> Option < String >
   ```
 
-### `src/main.rs` (Role: general, Lines: 214)
+### `src/main.rs` (Role: general, Lines: 310)
 - **Responsibility**: Core general logic in src/main.rs
 - **Imports**: use anyhow :: { Context , Result , bail } , use clap :: Parser , use console :: style , use std :: path :: PathBuf , use std :: process :: ExitCode , use std :: time :: Instant 
 

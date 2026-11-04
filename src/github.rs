@@ -51,6 +51,51 @@ struct GhStep {
     status: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct GhArtifactsResponse {
+    artifacts: Vec<GhArtifactItem>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GhArtifactItem {
+    name: String,
+    expired: bool,
+    workflow_run: Option<GhArtifactRun>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GhArtifactRun {
+    id: u64,
+}
+
+pub fn find_existing_artifact(repo: &str, pkgname: &str) -> Result<Option<u64>> {
+    let output = Command::new("gh")
+        .args(["api", &format!("repos/{repo}/actions/artifacts")])
+        .output()
+        .context("Failed to query GitHub artifacts API")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let res: GhArtifactsResponse = match serde_json::from_slice(&output.stdout) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+
+    let prefix = format!("pkg-{pkgname}-");
+    for art in res.artifacts {
+        if !art.expired && art.name.starts_with(&prefix) {
+            let Some(run_id) = art.workflow_run.map(|r| r.id) else {
+                continue;
+            };
+            return Ok(Some(run_id));
+        }
+    }
+
+    Ok(None)
+}
+
 pub fn get_default_repo() -> Result<String> {
     let output = Command::new("gh")
         .args(["api", "user"])
