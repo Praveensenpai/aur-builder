@@ -8,8 +8,8 @@ USE_COLOR=0
 
 C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_RED=""; C_YELLOW=""
 if (( USE_COLOR )); then
-  C_RESET="\e[0m"; C_BOLD="\e[1m"; C_DIM="\e[2m"
-  C_CYAN="\e[36m"; C_GREEN="\e[32m"; C_RED="\e[31m"; C_YELLOW="\e[33m"
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'
 fi
 
 # --- Spinner State ---
@@ -161,7 +161,7 @@ else
   # 2. Workflow Dispatch
   spin_set "Dispatching ${C_BOLD}${MAIN_PKG}${C_RESET} to ${REPO}..."
   deps_joined="${EXTRA_DEPS[*]:-}"
-  gh workflow run "$WORKFLOW" -R "$REPO" -f "pkgname=$MAIN_PKG" -f "deps=$deps_joined" \
+  gh workflow run "$WORKFLOW" -R "$REPO" -f "pkgname=$MAIN_PKG" -f "deps=$deps_joined" >/dev/null \
     || die "Workflow dispatch failed"
 
   spin_set "Waiting for runner to acknowledge ${C_BOLD}${MAIN_PKG}${C_RESET}..."
