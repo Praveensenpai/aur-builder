@@ -25,8 +25,23 @@ DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
 die() { echo "abuild: $*" >&2; exit 1; }
 [[ $# -ge 1 ]] || die "usage: abuild <pkgname> [aur-dep...]"
 
+# Verify a package exists on the AUR before wasting a remote CI run.
+aur_check() {
+  local pkg="$1"
+  local found
+  found="$(curl -sf "https://aur.archlinux.org/rpc/v5/info?arg[]=${pkg}" \
+    | grep -o '"resultcount":[0-9]*' | grep -o '[0-9]*' || true)"
+  [[ "${found:-0}" -ge 1 ]] || die "'${pkg}' not found on AUR"
+}
+
 main_pkg="$1"; shift
 deps="${*:-}"
+
+echo "==> checking AUR for $main_pkg${deps:+ (+ $deps)}..."
+aur_check "$main_pkg"
+for dep in $deps; do
+  aur_check "$dep"
+done
 
 echo "==> dispatching $main_pkg${deps:+ (+ $deps)} to $REPO"
 gh workflow run "$WORKFLOW" -R "$REPO" \
