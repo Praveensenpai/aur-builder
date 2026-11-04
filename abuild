@@ -1,76 +1,32 @@
 #!/usr/bin/env bash
 # abuild — build AUR packages on GitHub Actions, then install locally.
-#
-#   abuild <pkgname> [aur-dep...]
-#   abuild zen-browser-bin
-#   abuild some-tool other-dep
-#
-# Options:
-#   -n, --no-install  Download package only, skip local installation
-#   -h, --help        Show usage information
-#
-# Environment:
-#   AUR_BUILDER_REPO        Target repo (default: <login>/aur-builder)
-#   AUR_BUILDER_WORKFLOW    Workflow file (default: build.yml)
-#   AUR_BUILDER_DL          Download dir (default: /tmp/abuild)
-#   AUR_BUILDER_NOINSTALL=1 Download only, skip pacman -U
-#   NO_COLOR=1              Disable colored output
-
 set -euo pipefail
 
-# --- Visual Styling & TTY Detection ---
+# --- TTY & Colors ---
 USE_COLOR=0
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]; then
-  USE_COLOR=1
-fi
+[[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]] && USE_COLOR=1
 
+C_RESET=""; C_BOLD=""; C_DIM=""; C_CYAN=""; C_GREEN=""; C_RED=""; C_YELLOW=""
 if (( USE_COLOR )); then
-  C_RESET="\e[0m"
-  C_BOLD="\e[1m"
-  C_DIM="\e[2m"
-  C_CYAN="\e[36m"
-  C_GREEN="\e[32m"
-  C_RED="\e[31m"
-  C_YELLOW="\e[33m"
-  C_MAGENTA="\e[35m"
-else
-  C_RESET=""
-  C_BOLD=""
-  C_DIM=""
-  C_CYAN=""
-  C_GREEN=""
-  C_RED=""
-  C_YELLOW=""
-  C_MAGENTA=""
+  C_RESET="\e[0m"; C_BOLD="\e[1m"; C_DIM="\e[2m"
+  C_CYAN="\e[36m"; C_GREEN="\e[32m"; C_RED="\e[31m"; C_YELLOW="\e[33m"
 fi
 
 # --- Spinner State ---
-_SPIN_PID=""
-_SPIN_MSG_FILE=""
+_SPIN_PID=""; _SPIN_MSG_FILE=""
+CURRENT_RUN_ID=""; CURRENT_RUN_URL=""
 
 spin_start() {
   local msg="$1"
-  if (( ! USE_COLOR )); then
-    printf "  ... %s\n" "$msg"
-    return 0
-  fi
-
-  printf "\e[?25l" # Hide cursor
+  (( ! USE_COLOR )) && { printf "  ... %s\n" "$msg"; return 0; }
+  printf "\e[?25l"
   _SPIN_MSG_FILE="$(mktemp -t abuild_spin.XXXXXX)"
   printf "%s" "$msg" > "$_SPIN_MSG_FILE"
-
   (
     local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local count=${#frames[@]}
-    local i=0
-    while true; do
-      local text
-      if [[ -f "$_SPIN_MSG_FILE" ]]; then
-        text="$(<"$_SPIN_MSG_FILE")"
-      else
-        break
-      fi
-      printf "\r\e[2K  \e[36m%s\e[0m %s" "${frames[i]}" "$text"
+    local count=${#frames[@]} i=0
+    while [[ -f "$_SPIN_MSG_FILE" ]]; do
+      printf "\r\e[2K  \e[36m%s\e[0m %s" "${frames[i]}" "$(<"$_SPIN_MSG_FILE")"
       i=$(( (i + 1) % count ))
       sleep 0.07
     done
@@ -80,7 +36,7 @@ spin_start() {
 
 spin_set() {
   local msg="$1"
-  if [[ -n "$_SPIN_PID" ]] && [[ -n "$_SPIN_MSG_FILE" ]] && [[ -f "$_SPIN_MSG_FILE" ]]; then
+  if [[ -n "$_SPIN_PID" && -f "${_SPIN_MSG_FILE:-}" ]]; then
     printf "%s" "$msg" > "$_SPIN_MSG_FILE"
   elif (( ! USE_COLOR )); then
     printf "  ... %s\n" "$msg"
@@ -88,115 +44,69 @@ spin_set() {
 }
 
 spin_stop() {
-  local status="${1:-ok}"
-  local msg="$2"
-  if [[ -n "$_SPIN_PID" ]]; then
-    kill "$_SPIN_PID" 2>/dev/null || true
-    wait "$_SPIN_PID" 2>/dev/null || true
-    _SPIN_PID=""
-  fi
-  if [[ -n "$_SPIN_MSG_FILE" ]]; then
-    rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true
-    _SPIN_MSG_FILE=""
-  fi
-
-  if (( USE_COLOR )); then
-    printf "\e[?25h\r\e[2K"
-  fi
-
+  local status="${1:-ok}" msg="${2:-}"
+  [[ -n "$_SPIN_PID" ]] && { kill "$_SPIN_PID" 2>/dev/null || true; wait "$_SPIN_PID" 2>/dev/null || true; _SPIN_PID=""; }
+  [[ -n "$_SPIN_MSG_FILE" ]] && { rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true; _SPIN_MSG_FILE=""; }
+  (( USE_COLOR )) && printf "\e[?25h\r\e[2K"
+  [[ -z "$msg" ]] && return 0
   case "$status" in
     ok)   printf "  ${C_GREEN}✔${C_RESET} %s\n" "$msg" ;;
     fail) printf "  ${C_RED}✖${C_RESET} %s\n" "$msg" ;;
-    warn) printf "  ${C_YELLOW}⚠${C_RESET} %s\n" "$msg" ;;
     *)    printf "    %s\n" "$msg" ;;
   esac
 }
 
-# --- Cleanup & Interrupt Handling ---
 cleanup() {
-  local exit_code=$?
-  if (( USE_COLOR )); then
-    printf "\e[?25h" 2>/dev/null || true
-  fi
-  if [[ -n "${_SPIN_PID:-}" ]]; then
-    kill "$_SPIN_PID" 2>/dev/null || true
-    wait "$_SPIN_PID" 2>/dev/null || true
-  fi
-  if [[ -n "${_SPIN_MSG_FILE:-}" && -f "$_SPIN_MSG_FILE" ]]; then
-    rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true
-  fi
-  exit "$exit_code"
+  local code=$?
+  (( USE_COLOR )) && printf "\e[?25h" 2>/dev/null || true
+  [[ -n "${_SPIN_PID:-}" ]] && { kill "$_SPIN_PID" 2>/dev/null || true; wait "$_SPIN_PID" 2>/dev/null || true; }
+  [[ -n "${_SPIN_MSG_FILE:-}" && -f "$_SPIN_MSG_FILE" ]] && rm -f "$_SPIN_MSG_FILE" 2>/dev/null || true
+  exit "$code"
 }
 trap cleanup EXIT
 
 on_interrupt() {
-  if (( USE_COLOR )); then
-    printf "\e[?25h\r\e[2K"
-  fi
-  if [[ -n "${_SPIN_PID:-}" ]]; then
-    kill "$_SPIN_PID" 2>/dev/null || true
-    wait "$_SPIN_PID" 2>/dev/null || true
-  fi
-  printf "\n  ${C_YELLOW}⚠${C_RESET} Interrupted by user (Ctrl-C)\n"
-  if [[ -n "${CURRENT_RUN_URL:-}" ]]; then
-    printf "    ${C_DIM}Build continues remotely at:${C_RESET} %s\n" "$CURRENT_RUN_URL"
+  (( USE_COLOR )) && printf "\e[?25h\r\e[2K"
+  [[ -n "${_SPIN_PID:-}" ]] && { kill "$_SPIN_PID" 2>/dev/null || true; wait "$_SPIN_PID" 2>/dev/null || true; }
+  printf "\n  ${C_YELLOW}⚠${C_RESET} Interrupted — build continues remotely in background\n"
+  if [[ -n "${CURRENT_RUN_ID:-}" ]]; then
+    printf "    ${C_DIM}Reattach:${C_RESET} abuild --attach %s\n" "$CURRENT_RUN_ID"
+    printf "    ${C_DIM}Run URL:${C_RESET}  %s\n\n" "${CURRENT_RUN_URL:-}"
   fi
   exit 130
 }
 trap on_interrupt INT TERM HUP
 
-# --- Helper Utilities ---
-die() {
-  spin_stop fail "$*"
-  exit 1
-}
+die() { spin_stop fail "$*"; exit 1; }
 
 format_time() {
-  local ms="$1"
-  if (( ms < 1000 )); then
-    printf "%dms" "$ms"
-  else
-    local s=$(( ms / 1000 ))
-    if (( s < 60 )); then
-      local frac=$(( (ms % 1000) / 100 ))
-      printf "%d.%ds" "$s" "$frac"
-    else
-      local m=$(( s / 60 ))
-      local rem_s=$(( s % 60 ))
-      printf "%dm %02ds" "$m" "$rem_s"
-    fi
-  fi
+  local ms="${1:-0}"
+  local s=$(( ms / 1000 ))
+  (( ms < 1000 )) && { printf "%dms" "$ms"; return; }
+  (( s < 60 )) && { printf "%d.%ds" "$s" "$(( (ms % 1000) / 100 ))"; return; }
+  printf "%dm %02ds" "$(( s / 60 ))" "$(( s % 60 ))"
 }
 
-now_ms() {
-  local ns
-  ns="$(date +%s%N)"
-  printf "%d" "$(( ns / 1000000 ))"
-}
+now_ms() { printf "%d" "$(( $(date +%s%N) / 1000000 ))"; }
 
-# --- CLI Option Parsing ---
+# --- CLI Options ---
+DETACH=0; ATTACH_ID=""
 NO_INSTALL="${AUR_BUILDER_NOINSTALL:-0}"
 REPO="${AUR_BUILDER_REPO:-}"
 WORKFLOW="${AUR_BUILDER_WORKFLOW:-build.yml}"
 DL_DIR="${AUR_BUILDER_DL:-/tmp/abuild}"
-CURRENT_RUN_URL=""
 
 usage() {
   cat <<EOF
 Usage: abuild [options] <pkgname> [aur-dep...]
-
-Build AUR packages remotely on GitHub Actions and install locally.
+       abuild --attach <run_id>
 
 Options:
-  -n, --no-install    Download package without running pacman -U
+  -b, --detach        Dispatch build to background and exit immediately
+  -a, --attach <id>   Attach to an existing or background build run
+  -n, --no-install    Download package only, skip pacman -U
   -r, --repo <repo>   GitHub target repository (default: <login>/aur-builder)
   -h, --help          Show this help message
-
-Environment:
-  AUR_BUILDER_REPO        GitHub repository
-  AUR_BUILDER_WORKFLOW    Workflow file name (default: build.yml)
-  AUR_BUILDER_DL          Download destination (default: /tmp/abuild)
-  AUR_BUILDER_NOINSTALL=1 Skip local pacman installation
 EOF
   exit 0
 }
@@ -204,184 +114,117 @@ EOF
 declare -a PKG_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)
-      usage
-      ;;
-    -n|--no-install)
-      NO_INSTALL=1
-      shift
-      ;;
-    -r|--repo)
-      [[ $# -ge 2 ]] || { echo "abuild: missing argument for $1" >&2; exit 1; }
-      REPO="$2"
-      shift 2
-      ;;
-    *)
-      PKG_ARGS+=("$1")
-      shift
-      ;;
+    -h|--help) usage ;;
+    -b|--detach|--background) DETACH=1; shift ;;
+    -a|--attach) [[ $# -ge 2 ]] || die "missing run ID for $1"; ATTACH_ID="$2"; shift 2 ;;
+    -n|--no-install) NO_INSTALL=1; shift ;;
+    -r|--repo) [[ $# -ge 2 ]] || die "missing argument for $1"; REPO="$2"; shift 2 ;;
+    *) PKG_ARGS+=("$1"); shift ;;
   esac
 done
 
-[[ ${#PKG_ARGS[@]} -ge 1 ]] || {
-  echo "abuild: error: missing package name" >&2
-  echo "Try 'abuild --help' for usage." >&2
-  exit 1
-}
-
-MAIN_PKG="${PKG_ARGS[0]}"
-declare -a EXTRA_DEPS=("${PKG_ARGS[@]:1}")
-
-# --- Header ---
-printf "\n  ${C_BOLD}${C_CYAN}abuild${C_RESET} ${C_DIM}· AUR Remote Builder${C_RESET}\n\n"
-
-# --- Authentication & Repo Check ---
 if [[ -z "$REPO" ]]; then
   _login="$(gh api user --jq .login 2>/dev/null || true)"
-  if [[ -z "$_login" ]]; then
-    printf "  ${C_RED}✖${C_RESET} GitHub CLI is not authenticated\n" >&2
-    printf "    ${C_DIM}Run 'gh auth login' to authenticate.${C_RESET}\n" >&2
-    exit 1
-  fi
+  [[ -n "$_login" ]] || die "GitHub CLI not authenticated. Run 'gh auth login'."
   REPO="$_login/aur-builder"
 fi
 
-# --- Step 1: AUR Preflight Check ---
-spin_start "Resolving packages on AUR..."
-t_start=$(now_ms)
+TOTAL_START=$(now_ms)
 
-aur_query_url="https://aur.archlinux.org/rpc/v5/info"
-first=1
-for pkg in "${PKG_ARGS[@]}"; do
-  if (( first )); then
-    aur_query_url+="?arg[]=${pkg}"
-    first=0
-  else
-    aur_query_url+="&arg[]=${pkg}"
-  fi
-done
-
-aur_res="$(curl -sf "$aur_query_url" || true)"
-if [[ -z "$aur_res" ]]; then
-  die "Failed to connect to AUR RPC service"
-fi
-
-for pkg in "${PKG_ARGS[@]}"; do
-  pkg_ver="$(printf "%s" "$aur_res" | jq -r --arg p "$pkg" '.results[]? | select(.Name == $p) | .Version' 2>/dev/null || true)"
-  if [[ -z "$pkg_ver" ]]; then
-    die "Package '${C_BOLD}${pkg}${C_RESET}' was not found on AUR"
-  fi
-done
-
-t_aur=$(( $(now_ms) - t_start ))
-time_str="$(format_time "$t_aur")"
-if [[ ${#EXTRA_DEPS[@]} -eq 0 ]]; then
-  main_ver="$(printf "%s" "$aur_res" | jq -r --arg p "$MAIN_PKG" '.results[]? | select(.Name == $p) | .Version' 2>/dev/null || true)"
-  spin_stop ok "Resolved ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}v${main_ver}${C_RESET} ${C_DIM}(${time_str})${C_RESET}"
+# --- Attach Mode vs Fresh Build ---
+if [[ -n "$ATTACH_ID" ]]; then
+  CURRENT_RUN_ID="$ATTACH_ID"
+  CURRENT_RUN_URL="https://github.com/$REPO/actions/runs/$CURRENT_RUN_ID"
+  MAIN_PKG="attached-build"
+  spin_start "Connecting to run ${C_BOLD}#${CURRENT_RUN_ID}${C_RESET}..."
 else
-  spin_stop ok "Resolved ${C_BOLD}${#PKG_ARGS[@]}${C_RESET} packages on AUR ${C_DIM}(${time_str})${C_RESET}"
+  [[ ${#PKG_ARGS[@]} -ge 1 ]] || die "missing package name (try 'abuild --help')"
+  MAIN_PKG="${PKG_ARGS[0]}"
+  declare -a EXTRA_DEPS=("${PKG_ARGS[@]:1}")
+
+  # 1. AUR Preflight
+  spin_start "Resolving ${C_BOLD}${MAIN_PKG}${C_RESET} on AUR..."
+  aur_query_url="https://aur.archlinux.org/rpc/v5/info"
+  first=1
+  for p in "${PKG_ARGS[@]}"; do
+    (( first )) && aur_query_url+="?arg[]=${p}" || aur_query_url+="&arg[]=${p}"
+    first=0
+  done
+
+  aur_res="$(curl -sf "$aur_query_url" || true)"
+  [[ -n "$aur_res" ]] || die "Failed to connect to AUR RPC"
+  for p in "${PKG_ARGS[@]}"; do
+    p_ver="$(printf "%s" "$aur_res" | jq -r --arg p "$p" '.results[]? | select(.Name == $p) | .Version' 2>/dev/null || true)"
+    [[ -n "$p_ver" ]] || die "Package '${C_BOLD}${p}${C_RESET}' not found on AUR"
+  done
+
+  # 2. Workflow Dispatch
+  spin_set "Dispatching ${C_BOLD}${MAIN_PKG}${C_RESET} to ${REPO}..."
+  deps_joined="${EXTRA_DEPS[*]:-}"
+  gh workflow run "$WORKFLOW" -R "$REPO" -f "pkgname=$MAIN_PKG" -f "deps=$deps_joined" \
+    || die "Workflow dispatch failed"
+
+  spin_set "Waiting for runner to acknowledge ${C_BOLD}${MAIN_PKG}${C_RESET}..."
+  for _ in {1..20}; do
+    CURRENT_RUN_ID="$(gh run list -R "$REPO" -w "$WORKFLOW" -L 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    [[ -n "$CURRENT_RUN_ID" ]] && break
+    sleep 1.5
+  done
+  [[ -n "$CURRENT_RUN_ID" ]] || die "Run did not appear in GitHub Actions"
+
+  CURRENT_RUN_URL="https://github.com/$REPO/actions/runs/$CURRENT_RUN_ID"
+  if (( DETACH )); then
+    spin_stop ok "Dispatched ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}(run #${CURRENT_RUN_ID})${C_RESET}"
+    printf "    ${C_DIM}↳ Reattach:${C_RESET} abuild --attach %s\n" "$CURRENT_RUN_ID"
+    printf "    ${C_DIM}↳ Remote:${C_RESET}   %s\n\n" "$CURRENT_RUN_URL"
+    exit 0
+  fi
 fi
 
-# --- Step 2: Dispatch GitHub Workflow ---
-spin_start "Dispatching build to ${C_BOLD}${REPO}${C_RESET}..."
-t_start=$(now_ms)
-
-deps_joined="${EXTRA_DEPS[*]:-}"
-gh workflow run "$WORKFLOW" -R "$REPO" \
-  -f "pkgname=$MAIN_PKG" -f "deps=$deps_joined" \
-  || die "Workflow dispatch failed (verify repo permissions & workflow name)"
-
-# Poll for the dispatched run ID
-run_id=""
-for _ in {1..20}; do
-  run_id="$(gh run list -R "$REPO" -w "$WORKFLOW" -L 1 \
-              --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
-  [[ -n "$run_id" ]] && break
-  sleep 1.5
-done
-[[ -n "$run_id" ]] || die "Dispatched run did not appear in GitHub Actions"
-
-CURRENT_RUN_URL="https://github.com/$REPO/actions/runs/$run_id"
-t_disp=$(( $(now_ms) - t_start ))
-spin_stop ok "Queued run ${C_BOLD}#${run_id}${C_RESET} ${C_DIM}($(format_time "$t_disp"))${C_RESET}"
-printf "    ${C_DIM}↳ %s${C_RESET}\n" "$CURRENT_RUN_URL"
-
-# --- Step 3: Monitor Remote Build Progress ---
-spin_start "Building on GitHub Actions ${C_DIM}(starting...)${C_RESET}"
+# --- Live Build Monitor ---
 t_build_start=$(now_ms)
-
 while true; do
-  view_json="$(gh run view "$run_id" -R "$REPO" --json status,conclusion,jobs 2>/dev/null || true)"
+  view_json="$(gh run view "$CURRENT_RUN_ID" -R "$REPO" --json status,conclusion,jobs,name 2>/dev/null || true)"
   if [[ -n "$view_json" ]]; then
     run_status="$(printf "%s" "$view_json" | jq -r '.status // empty' 2>/dev/null || true)"
     run_conclusion="$(printf "%s" "$view_json" | jq -r '.conclusion // empty' 2>/dev/null || true)"
 
     if [[ "$run_status" == "completed" ]]; then
-      t_build=$(( $(now_ms) - t_build_start ))
-      b_time="$(format_time "$t_build")"
-      if [[ "$run_conclusion" == "success" ]]; then
-        spin_stop ok "Built ${C_BOLD}${MAIN_PKG}${C_RESET} successfully ${C_DIM}(${b_time})${C_RESET}"
-        break
-      else
-        spin_stop fail "Remote build finished with ${C_RED}${run_conclusion}${C_RESET} ${C_DIM}(${b_time})${C_RESET}"
-        printf "\n    ${C_RED}Build logs:${C_RESET} gh run view %s -R %s --log-failed\n\n" "$run_id" "$REPO"
+      if [[ "$run_conclusion" == "success" ]]; then break; else
+        spin_stop fail "Build failed with ${C_RED}${run_conclusion}${C_RESET}"
+        printf "    ${C_RED}Logs:${C_RESET} gh run view %s -R %s --log-failed\n\n" "$CURRENT_RUN_ID" "$REPO"
         exit 1
       fi
     fi
 
-    # Extract current active step or job status
-    active_step="$(printf "%s" "$view_json" | jq -r '
-      .jobs[0].steps[]? | select(.status == "in_progress") | .name
-    ' 2>/dev/null || true)"
-
-    t_cur=$(( $(now_ms) - t_build_start ))
-    cur_time="$(format_time "$t_cur")"
-    if [[ -n "$active_step" ]]; then
-      spin_set "Building on GitHub Actions ${C_DIM}(${active_step} · ${cur_time})${C_RESET}"
-    else
-      spin_set "Building on GitHub Actions ${C_DIM}(${run_status} · ${cur_time})${C_RESET}"
-    fi
+    active_step="$(printf "%s" "$view_json" | jq -r '.jobs[0].steps[]? | select(.status == "in_progress") | .name' 2>/dev/null || true)"
+    cur_time="$(format_time "$(( $(now_ms) - t_build_start ))")"
+    spin_set "Building ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}(${active_step:-$run_status} · ${cur_time})${C_RESET}"
   fi
   sleep 2.5
 done
 
-# --- Step 4: Download Artifacts ---
-spin_start "Downloading package artifacts..."
-t_start=$(now_ms)
-dest="$DL_DIR/$MAIN_PKG"
-rm -rf "$dest"
-mkdir -p "$dest"
-
-gh run download "$run_id" -R "$REPO" -D "$dest" >/dev/null \
-  || die "Failed to download build artifact from GitHub"
+# --- Download Artifacts ---
+spin_set "Downloading ${C_BOLD}${MAIN_PKG}${C_RESET} package artifacts..."
+dest="$DL_DIR/$MAIN_PKG"; rm -rf "$dest"; mkdir -p "$dest"
+gh run download "$CURRENT_RUN_ID" -R "$REPO" -D "$dest" >/dev/null || die "Failed to download build artifact"
 
 declare -a pkgs=()
-while IFS= read -r -d '' f; do
-  pkgs+=("$f")
-done < <(find "$dest" -name '*.pkg.tar.*' -type f -print0 | sort -z)
-
+while IFS= read -r -d '' f; do pkgs+=("$f"); done < <(find "$dest" -name '*.pkg.tar.*' -type f -print0 | sort -z)
 (( ${#pkgs[@]} )) || die "Downloaded artifact contained no package files (.pkg.tar.*)"
 
-t_dl=$(( $(now_ms) - t_start ))
+first_pkg="${pkgs[0]##*/}"
+[[ "$MAIN_PKG" == "attached-build" ]] && MAIN_PKG="${first_pkg%%-[0-9]*}"
+
 total_size="$(du -ch "${pkgs[@]}" | awk 'END{print $1}')"
-spin_stop ok "Downloaded ${C_BOLD}${#pkgs[@]}${C_RESET} package(s) ${C_DIM}(${total_size}, $(format_time "$t_dl"))${C_RESET}"
+total_time="$(format_time "$(( $(now_ms) - TOTAL_START ))")"
+spin_stop ok "Ready: ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}(${total_size} in ${total_time})${C_RESET}"
 
-for p in "${pkgs[@]}"; do
-  p_name="${p##*/}"
-  p_size="$(du -h "$p" | cut -f1)"
-  printf "    ${C_DIM}↳ %s (%s)${C_RESET}\n" "$p_name" "$p_size"
-done
-
-# --- Step 5: Local Installation ---
 if (( NO_INSTALL )); then
-  printf "\n  ${C_YELLOW}ℹ${C_RESET} ${C_BOLD}--no-install${C_RESET} flag set; skipping pacman -U\n"
   printf "    ${C_DIM}Install manually:${C_RESET} sudo pacman -U %s\n\n" "${pkgs[*]}"
   exit 0
 fi
 
-printf "\n  ${C_BOLD}Installing with pacman...${C_RESET}\n\n"
 t_install_start=$(now_ms)
 sudo pacman -U --noconfirm "${pkgs[@]}"
-t_install=$(( $(now_ms) - t_install_start ))
-
-printf "\n  ${C_GREEN}✔${C_RESET} ${C_BOLD}All done!${C_RESET} Installed ${C_BOLD}%s${C_RESET} ${C_DIM}($(format_time "$t_install"))${C_RESET}\n\n"
+printf "  ${C_GREEN}✔${C_RESET} Installed ${C_BOLD}${MAIN_PKG}${C_RESET} ${C_DIM}($(format_time "$(( $(now_ms) - t_install_start ))"))${C_RESET}\n\n"
